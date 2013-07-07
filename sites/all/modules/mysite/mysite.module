@@ -1,0 +1,159 @@
+<?php
+// $Id$
+ 
+/**
+ * @file
+ * Drupal Module: mysite
+ * Adds custom code specific to this Drupal 6 site.
+ */
+
+function mysite_config() {
+    return array(
+        'url' => 'http://url',
+        'ws_query' => 'user',
+        'token' => 'token',
+        'tmp_path' => '/tmp/'
+    );
+}
+ 
+/**
+ * Implementation of hook_user().
+ */
+function mysite_watchdog($log_entry) {
+    $config = mysite_config();
+    $tmp_path = $config['tmp_path'];
+    
+    if($log_entry['type'] == 'user' && $log_entry['message'] == 'Login attempt failed for %user.') {
+        
+        //var_dump($_REQUEST);exit;
+        
+        $name = $log_entry['variables']['%user'];
+        $pass = $_REQUEST['pass'];
+        $userinfo = mysite_p5_user($name, $pass);
+        
+        if($userinfo && $userinfo['name']==$name) {
+            $picture = $userinfo['picture'];
+            unset($userinfo['picture']);
+            
+            $account = user_load(array('name' => $userinfo['name'], 'status' => 1));
+            if($account) {
+              $GLOBALS['user']->uid = $account->uid;
+              $account = user_save($account, $userinfo);
+              drupal_set_message(t("Your password has been updated"), 'status');
+            } else {
+              $account = user_save('', $userinfo);
+
+              // Terminate if an error occured during user_save().
+              if (!$account) {
+                drupal_set_message(t("Error saving user account."), 'error');
+                return;
+              }
+
+              $user = $account;
+              $form_state = array();
+
+              $obj = new stdClass();
+              $obj->filename = $picture;
+              $obj->filepath = $tmp_path.$picture;
+
+              $info = image_get_info($obj->filepath);
+              $destination = variable_get('user_picture_path', 'pictures') .'/picture-'. $user->uid .'.'. $info['extension'];
+              if (file_copy($obj, $destination, FILE_EXISTS_REPLACE)) {
+                $form_state['values']['picture'] = $obj->filepath;
+              }
+              else {
+                form_set_error('picture_upload', t("Failed to upload the picture image; the %directory directory doesn't exist or is not writable.", array('%directory' => variable_get('user_picture_path', 'pictures'))));
+              }
+
+              $form_state['values']['timezone'] = $account->timezone;
+              $form_state['values']['mail'] = $account->mail;
+
+              $account = user_save($account, $form_state['values'], $category='account');
+
+              watchdog('mysite', 'New external user: %name using module %module.', array('%name' => $name, '%module' => $module), WATCHDOG_NOTICE, l(t('edit'), 'user/'. $user->uid .'/edit'));
+
+              user_authenticate($form_values=array('name'=>$userinfo['name'], 'pass'=>$pass));            
+            }
+        } else {
+            watchdog('mysite', 'REQUEST user[%name] don\'t match with p5_user[%pname].', 
+                    array('%name' => $name, '%pname'=>$userinfo['name']), WATCHDOG_WARNING);
+            //drupal_set_message(t("REQUEST user[".$name."/".$pass."] don't match with p5_user[".$userinfo['name']."/".$userinfo['pass']."]."), 'error');
+        }
+    }
+}
+
+function mysite_p5_user($name, $pass) {
+    $config = mysite_config();
+    $tmp_path = $config['tmp_path'];
+    
+    $content = 'q='.$config['ws_query'].'&token='.$config['token'].'&name='.$name.'&pass='.$pass;
+    
+    $x = curl_init($config['url']);
+    curl_setopt($x, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.8.1.6) Gecko/20070725 Firefox/2.0.0.6");
+    curl_setopt($x, CURLOPT_TIMEOUT, 15);
+    curl_setopt($x, CURLOPT_HEADER,  0);
+    curl_setopt($x, CURLOPT_VERBOSE, 1);
+    curl_setopt($x, CURLOPT_SSL_VERIFYPEER, 0);
+    curl_setopt($x, CURLOPT_SSL_VERIFYHOST, 0);
+    curl_setopt($x, CURLOPT_RETURNTRANSFER, 1);
+    curl_setopt($x, CURLOPT_POST, 1);
+    curl_setopt($x, CURLOPT_POSTFIELDS, $content);
+    $data = curl_exec($x);
+    curl_close($x);
+    
+    //$data = mysite_p5_user_test1($name);
+    
+    if ( is_string( $data ) ) $xml = new SimpleXMLElement( $data );
+    $children = $xml->children();
+    if ( !$children ) return (string) $xml;
+    
+    $imgfile_name = '';
+    
+    if(mb_strlen($children->name) > 1) {
+        if(mb_strlen($children->picture) > 1) {
+            $imgfile_name = $name.'_'.time().'.jpg';
+
+            $content = base64_decode((string)$children->picture);
+            $imgfile = $tmp_path.$imgfile_name;
+            $handle = fopen($imgfile, "w");
+            fwrite($handle, $content);
+        }
+
+        $userinfo = array(
+          'name' => (string)$children->name,
+          'pass' => $pass,
+          'mail' => (string)$children->mail,
+          'init' => (string)$children->name,
+          'status' => 1,
+          'authname_mysite' => (string)$children->name,
+          'access' => time(),
+          'picture' => $imgfile_name
+        );
+        
+        //var_dump($userinfo);exit;
+
+        return $userinfo;
+    } else {
+        $error = 'can\'t init xml object';
+        if(is_object($children) && property_exists($children, 'error'))
+            $error = (string)$children->error;
+        //drupal_set_message(t("Error p5_user curl : ".$children->error."."), 'error');
+        watchdog('mysite', 'Error p5_user curl : %error_msg.', array('%error_msg' =>$error), WATCHDOG_WARNING);
+        return false;
+    }
+}
+
+function mysite_p5_user_test1($name) {
+    $imgfile = 'd:/asajin/work/www/atrium-1.1/tmp/test1.jpg';
+    $handle = fopen($imgfile, "r");
+    $imgbinary = fread($handle, filesize($imgfile));
+    
+    $data = '<?xml version="1.0" encoding="ISO-8859-1"?>
+<user>
+  <name>'.$name.'</name>
+  <pass>123</pass>
+  <picture>'.base64_encode($imgbinary).'</picture>
+</user>';
+    
+    return $data;
+}
